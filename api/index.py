@@ -38,13 +38,22 @@ HTML_PAGE = """
         <button id="dlBtn" onclick="startDownload()">Download Starten</button>
         
         <p class="status" id="statusText">Bereit.</p>
+        <div id="debugLog" style="margin-top: 20px; font-size: 0.7rem; color: #666; text-align: left; width: 100%; display: none;"></div>
     </div>
 
     <script>
+        function log(msg) {
+            console.log(msg);
+            const d = document.getElementById('debugLog');
+            d.style.display = 'block';
+            d.innerHTML += `<div>${msg}</div>`;
+        }
+
         async function startDownload() {
             const url = document.getElementById('urlInput').value;
             const btn = document.getElementById('dlBtn');
             const status = document.getElementById('statusText');
+            document.getElementById('debugLog').innerHTML = ""; // Clear log
             
             if (!url) {
                 status.style.color = '#ff5555';
@@ -59,21 +68,19 @@ HTML_PAGE = """
             status.innerText = "Frage Cobalt API (via Browser)...";
 
             // Liste von Instanzen, die wir client-seitig abfragen
+            // Stand: 22.12.2025 - Geprüft auf CORS & Erreichbarkeit
             const instances = [
                 "https://cobalt-backend.canine.tools",
                 "https://cobalt-api.clxxped.lol",
                 "https://nuko-c.meowing.de",
-                "https://capi.3kh0.net",
-                "https://api.cobalt.tools/api/json",
-                "https://cobalt.api.wuk.sh/api/json",
-                "https://co.wuk.sh/api/json"
+                "https://capi.3kh0.net"
             ];
 
             let success = false;
 
             for (const api_url of instances) {
                 try {
-                    console.log("Versuche:", api_url);
+                    log("Versuche: " + api_url);
                     
                     const response = await fetch(api_url, {
                         method: "POST",
@@ -96,11 +103,17 @@ HTML_PAGE = """
                         })
                     });
 
+                    if (!response.ok) {
+                        log(`Fehler HTTP ${response.status} bei ${api_url}`);
+                        continue;
+                    }
+
                     const data = await response.json();
 
                     if (data.url) {
                         status.style.color = '#55ff55';
                         status.innerText = "Link gefunden! Download startet...";
+                        log("Erfolg! URL: " + data.url);
                         
                         // Direkter Download-Start im Browser
                         window.location.href = data.url;
@@ -111,19 +124,22 @@ HTML_PAGE = """
                         // Falls es mehrere Versionen gibt, nimm die erste
                         status.style.color = '#55ff55';
                         status.innerText = "Link gefunden! Download startet...";
+                        log("Erfolg! Picker URL: " + data.picker[0].url);
                         window.location.href = data.picker[0].url;
                         success = true;
                         break;
+                    } else {
+                        log("Keine URL in Antwort: " + JSON.stringify(data));
                     }
                 } catch (e) {
-                    console.warn("Fehler bei Instanz:", api_url, e);
+                    log("Exception bei " + api_url + ": " + e.message);
                     // Weiter zur nächsten Instanz
                 }
             }
 
             if (!success) {
                 status.style.color = '#ff5555';
-                status.innerText = "Fehler: Konnte Video nicht finden (CORS/Block).";
+                status.innerText = "Fehler: Alle Instanzen fehlgeschlagen. Siehe Log unten.";
             }
             
             btn.disabled = false;
