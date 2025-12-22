@@ -60,6 +60,10 @@ HTML_PAGE = """
 
             // Liste von Instanzen, die wir client-seitig abfragen
             const instances = [
+                "https://cobalt-backend.canine.tools",
+                "https://cobalt-api.clxxped.lol",
+                "https://nuko-c.meowing.de",
+                "https://capi.3kh0.net",
                 "https://api.cobalt.tools/api/json",
                 "https://cobalt.api.wuk.sh/api/json",
                 "https://co.wuk.sh/api/json"
@@ -79,10 +83,16 @@ HTML_PAGE = """
                         },
                         body: JSON.stringify({
                             url: url,
-                            vCodec: "h264",
+                            // New API (v10+)
+                            videoQuality: "1080",
+                            audioFormat: "mp3",
+                            filenameStyle: "basic",
+                            youtubeVideoCodec: "h264",
+                            // Old API (Legacy fallback)
                             vQuality: "1080",
                             aFormat: "mp3",
-                            filenamePattern: "basic"
+                            filenamePattern: "basic",
+                            vCodec: "h264"
                         })
                     });
 
