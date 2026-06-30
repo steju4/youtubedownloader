@@ -13,15 +13,21 @@ PIPED_INSTANCES = [
     "https://pipedapi.drgns.space",
     "https://pipedapi.owo.si",
     "https://piped-api.privacy.com.de",
+    "https://piped.smnz.de",
+    "https://piped.hostux.net",
 ]
 
 # ── Invidious instances (server-side, combined video+audio streams) ────────────
 INVIDIOUS_INSTANCES = [
+    "https://yewtu.be",
     "https://inv.tux.pizza",
     "https://invidious.privacyredirect.com",
     "https://yt.cdaut.de",
     "https://invidious.nerdvpn.de",
     "https://inv.nadeko.net",
+    "https://invidious.perennialte.ch",
+    "https://invidious.fdn.fr",
+    "https://invidious.private.coffee",
 ]
 
 HTML_PAGE = """
@@ -183,14 +189,13 @@ def _best_url_from_info(info):
 
 def try_ytdlp(url):
     """
-    Use yt-dlp for non-YouTube URLs (TikTok, Twitter, etc.) and as a best-effort
-    attempt for YouTube with the android_vr client.
+    Use yt-dlp for non-YouTube URLs (TikTok, Twitter, etc.).
+    For YouTube, tries tv_embedded first (TVHTML5_SIMPLY_EMBEDDED_PLAYER),
+    which may bypass cloud-IP bot detection used by regular web/android clients.
     """
     import yt_dlp
 
-    # Try android_vr first (current yt-dlp default, works for many non-YT platforms)
-    # then tv as a secondary attempt.
-    for client in ['android_vr', 'tv']:
+    for client in ['tv_embedded', 'android_vr', 'tv']:
         try:
             opts = {
                 'format': (
@@ -201,7 +206,7 @@ def try_ytdlp(url):
                 'quiet': True,
                 'no_warnings': True,
                 'noplaylist': True,
-                'socket_timeout': 8,
+                'socket_timeout': 10,
                 'extractor_args': {'youtube': {'player_client': [client]}},
             }
             with yt_dlp.YoutubeDL(opts) as ydl:
@@ -210,6 +215,7 @@ def try_ytdlp(url):
                 continue
             dl_url, ext, quality = _best_url_from_info(info)
             if dl_url:
+                print(f'yt-dlp/{client}: success {quality}', flush=True)
                 return {
                     'url': dl_url,
                     'title': info.get('title', 'video'),
@@ -219,23 +225,111 @@ def try_ytdlp(url):
                 }
         except Exception as e:
             msg = str(e)
-            # Bot-detection is a hard stop for YouTube – skip remaining clients
+            print(f'yt-dlp/{client}: {msg[:80]}', flush=True)
             if 'Sign in' in msg or 'bot' in msg.lower() or 'LOGIN_REQUIRED' in msg:
                 raise RuntimeError('YouTube bot-detection: ' + msg[:120])
-            # For other platforms keep trying
             continue
     return None
 
 
+def try_youtube_tv_api(video_id):
+    """
+    Call YouTube's innertube player API directly using the
+    TVHTML5_SIMPLY_EMBEDDED_PLAYER context (clientName 85).
+    Smart-TV/embedded-player requests may not be subject to the same
+    cloud-IP bot-detection rules as web/android client requests.
+    """
+    try:
+        r = http.post(
+            'https://www.youtube.com/youtubei/v1/player',
+            json={
+                'context': {
+                    'client': {
+                        'clientName': 'TVHTML5_SIMPLY_EMBEDDED_PLAYER',
+                        'clientVersion': '2.0',
+                        'hl': 'en',
+                        'gl': 'US',
+                    },
+                    'thirdParty': {'embedUrl': 'https://www.youtube.com/'},
+                },
+                'videoId': video_id,
+            },
+            headers={
+                'Content-Type': 'application/json',
+                'User-Agent': (
+                    'Mozilla/5.0 (SMART-TV; LINUX; Tizen 6.0) '
+                    'AppleWebKit/538.1 (KHTML, like Gecko) '
+                    'Version/6.0 TV Safari/538.1'
+                ),
+                'X-YouTube-Client-Name': '85',
+                'X-YouTube-Client-Version': '2.0',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/',
+            },
+            timeout=10,
+        )
+        print(f'YouTube TV API: HTTP {r.status_code}', flush=True)
+        if not r.ok:
+            return None
+
+        data = r.json()
+        status = data.get('playabilityStatus', {}).get('status', '')
+        print(f'YouTube TV API: playability={status}', flush=True)
+        if status != 'OK':
+            return None
+
+        streaming = data.get('streamingData', {})
+        title = data.get('videoDetails', {}).get('title', 'video')
+
+        # Prefer muxed (combined video+audio) formats
+        muxed = [f for f in streaming.get('formats', []) if f.get('url')]
+        if muxed:
+            best = max(muxed, key=lambda f: f.get('height', 0) or 0)
+            print(f'YouTube TV API: muxed {best.get("height")}p', flush=True)
+            return {
+                'url': best['url'],
+                'title': title,
+                'ext': 'mp4',
+                'quality': f"{best.get('height', '?')}p",
+                'source': 'youtube-tv',
+            }
+
+        # Fallback: video-only adaptive stream (no audio)
+        adaptive = [
+            f for f in streaming.get('adaptiveFormats', [])
+            if f.get('url') and 'video' in f.get('mimeType', '')
+        ]
+        if adaptive:
+            best = max(adaptive, key=lambda f: f.get('height', 0) or 0)
+            print(f'YouTube TV API: adaptive video-only {best.get("height")}p', flush=True)
+            return {
+                'url': best['url'],
+                'title': title,
+                'ext': 'mp4',
+                'quality': f"{best.get('height', '?')}p",
+                'source': 'youtube-tv',
+                'audioWarning': True,
+            }
+
+        print('YouTube TV API: no usable streams', flush=True)
+        return None
+    except Exception as e:
+        print(f'YouTube TV API error: {e}', flush=True)
+        return None
+
+
 def try_piped(video_id):
     """Server-side Piped API call – bypasses browser CORS restrictions."""
+    ua = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     for base in PIPED_INSTANCES:
         try:
-            r = http.get(f'{base}/streams/{video_id}', timeout=7)
+            r = http.get(f'{base}/streams/{video_id}', timeout=7, headers=ua)
+            print(f'Piped {base}: HTTP {r.status_code}', flush=True)
             if not r.ok:
                 continue
             data = r.json()
             streams = [s for s in (data.get('videoStreams') or []) if s.get('url')]
+            print(f'Piped {base}: {len(streams)} streams', flush=True)
             if not streams:
                 continue
 
@@ -256,24 +350,29 @@ def try_piped(video_id):
                 'source': 'piped',
                 'audioWarning': not combined,
             }
-        except Exception:
+        except Exception as exc:
+            print(f'Piped {base}: exception {type(exc).__name__}: {exc}', flush=True)
             continue
     return None
 
 
 def try_invidious(video_id):
     """Server-side Invidious API – returns combined video+audio formatStreams."""
+    ua = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
     for base in INVIDIOUS_INSTANCES:
         try:
             r = http.get(
                 f'{base}/api/v1/videos/{video_id}',
                 params={'fields': 'formatStreams,title'},
-                timeout=7,
+                timeout=8,
+                headers=ua,
             )
+            print(f'Invidious {base}: HTTP {r.status_code}', flush=True)
             if not r.ok:
                 continue
             data = r.json()
             streams = data.get('formatStreams') or []
+            print(f'Invidious {base}: {len(streams)} formatStreams', flush=True)
             if not streams:
                 continue
 
@@ -290,7 +389,8 @@ def try_invidious(video_id):
                 'quality': best.get('qualityLabel', best.get('resolution', '?')),
                 'source': 'invidious',
             }
-        except Exception:
+        except Exception as exc:
+            print(f'Invidious {base}: exception {type(exc).__name__}: {exc}', flush=True)
             continue
     return None
 
@@ -317,6 +417,7 @@ def get_download_url():
     if video_id:
         tasks['piped'] = (try_piped, (video_id,))
         tasks['invidious'] = (try_invidious, (video_id,))
+        tasks['youtube_tv'] = (try_youtube_tv_api, (video_id,))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         fmap = {pool.submit(fn, *args): name for name, (fn, args) in tasks.items()}
