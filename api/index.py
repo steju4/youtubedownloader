@@ -1,9 +1,62 @@
 from flask import Flask, request, jsonify, make_response
 import re
+import os
+import base64
+import tempfile
 import concurrent.futures
 import requests as http
 
 app = Flask(__name__)
+
+# ── YouTube cookies ───────────────────────────────────────────────────────────
+# YouTube blocks datacenter IPs (Vercel/AWS) with bot-detection. The only
+# reliable workaround is authenticating yt-dlp with real account cookies.
+# Provide them via a Vercel environment variable:
+#   YOUTUBE_COOKIES_B64  – base64 of a Netscape cookies.txt (recommended)
+#   YOUTUBE_COOKIES      – raw cookies.txt content (alternative)
+_COOKIE_PATH = None
+_COOKIE_DONE = False
+
+
+def get_cookie_file():
+    """Materialise the configured cookies into a temp file once; cache the path."""
+    global _COOKIE_PATH, _COOKIE_DONE
+    if _COOKIE_DONE:
+        return _COOKIE_PATH
+    _COOKIE_DONE = True
+
+    content = None
+    b64 = os.environ.get('YOUTUBE_COOKIES_B64', '').strip()
+    if b64:
+        try:
+            content = base64.b64decode(b64).decode('utf-8')
+        except Exception as e:
+            print(f'cookie: base64 decode failed: {e}', flush=True)
+    if not content:
+        raw = os.environ.get('YOUTUBE_COOKIES', '').strip()
+        if raw:
+            content = raw
+    if not content:
+        print('cookie: no YOUTUBE_COOKIES[_B64] env var set', flush=True)
+        return None
+
+    # yt-dlp requires the Netscape header line to recognise the file
+    head = content.lstrip()
+    if not (head.startswith('# HTTP Cookie File')
+            or head.startswith('# Netscape HTTP Cookie File')):
+        content = '# Netscape HTTP Cookie File\n' + content
+    if not content.endswith('\n'):
+        content += '\n'
+
+    try:
+        path = os.path.join(tempfile.gettempdir(), 'yt_cookies.txt')
+        with open(path, 'w') as f:
+            f.write(content)
+        _COOKIE_PATH = path
+        print(f'cookie: wrote {len(content)} bytes to {path}', flush=True)
+    except Exception as e:
+        print(f'cookie: write failed: {e}', flush=True)
+    return _COOKIE_PATH
 
 # ── Piped instances (server-side, no CORS issues) ─────────────────────────────
 PIPED_INSTANCES = [
@@ -189,13 +242,21 @@ def _best_url_from_info(info):
 
 def try_ytdlp(url):
     """
-    Use yt-dlp for non-YouTube URLs (TikTok, Twitter, etc.).
-    For YouTube, tries tv_embedded first (TVHTML5_SIMPLY_EMBEDDED_PLAYER),
-    which may bypass cloud-IP bot detection used by regular web/android clients.
+    Use yt-dlp for any supported site. For YouTube the request originates from
+    Vercel's datacenter IP, so it only succeeds when authenticated with cookies
+    (YOUTUBE_COOKIES[_B64]). With cookies, the 'web' client is most reliable;
+    without, we still try TV/embedded clients as a best effort.
     """
     import yt_dlp
 
-    for client in ['tv_embedded', 'android_vr', 'tv']:
+    cookie_file = get_cookie_file()
+    if cookie_file:
+        clients = ['web', 'mweb', 'tv_embedded']
+    else:
+        clients = ['tv_embedded', 'android_vr', 'tv']
+
+    last_bot_msg = None
+    for client in clients:
         try:
             opts = {
                 'format': (
@@ -209,6 +270,8 @@ def try_ytdlp(url):
                 'socket_timeout': 10,
                 'extractor_args': {'youtube': {'player_client': [client]}},
             }
+            if cookie_file:
+                opts['cookiefile'] = cookie_file
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
             if not info:
@@ -227,8 +290,20 @@ def try_ytdlp(url):
             msg = str(e)
             print(f'yt-dlp/{client}: {msg[:80]}', flush=True)
             if 'Sign in' in msg or 'bot' in msg.lower() or 'LOGIN_REQUIRED' in msg:
-                raise RuntimeError('YouTube bot-detection: ' + msg[:120])
+                last_bot_msg = msg[:120]
+                continue  # try the next client before giving up
             continue
+
+    if last_bot_msg is not None:
+        if cookie_file:
+            raise RuntimeError(
+                'YouTube bot-detection trotz Cookies – Cookies evtl. abgelaufen '
+                'oder ungültig. Bitte neu exportieren. (' + last_bot_msg + ')'
+            )
+        raise RuntimeError(
+            'YouTube bot-detection: keine Cookies konfiguriert. Bitte '
+            'YOUTUBE_COOKIES_B64 in Vercel setzen. (' + last_bot_msg + ')'
+        )
     return None
 
 
