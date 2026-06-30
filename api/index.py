@@ -122,7 +122,7 @@ async function go() {
             log('Fehler: ' + (data.error || 'Unbekannt'));
             st('Fehler: ' + (data.error || 'Kein Download-Link gefunden.').slice(0, 120), '#f55');
         } else {
-            const name = (data.title || 'video').replace(/[<>:"\/\\|?*]/g, '_')
+            const name = (data.title || 'video').replace(/[<>:"/\\\\|?*]/g, '_')
                        + '.' + (data.ext || 'mp4');
             const src = data.source ? ' [' + data.source + ']' : '';
             const warn = data.audioWarning ? ' ⚠️ kein Ton' : '';
