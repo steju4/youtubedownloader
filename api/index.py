@@ -1,6 +1,28 @@
 from flask import Flask, request, jsonify, make_response
+import re
+import concurrent.futures
+import requests as http
 
 app = Flask(__name__)
+
+# ── Piped instances (server-side, no CORS issues) ─────────────────────────────
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.yt",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.owo.si",
+    "https://piped-api.privacy.com.de",
+]
+
+# ── Invidious instances (server-side, combined video+audio streams) ────────────
+INVIDIOUS_INSTANCES = [
+    "https://inv.tux.pizza",
+    "https://invidious.privacyredirect.com",
+    "https://yt.cdaut.de",
+    "https://invidious.nerdvpn.de",
+    "https://inv.nadeko.net",
+]
 
 HTML_PAGE = """
 <!DOCTYPE html>
@@ -11,215 +33,266 @@ HTML_PAGE = """
     <title>Julian's Video Downloader</title>
     <style>
         * { box-sizing: border-box; }
-        body { font-family: 'Segoe UI', sans-serif; background-color: #121212; color: #eee; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 1rem; }
-        .container { background-color: #1e1e1e; padding: 2.5rem; border-radius: 12px; box-shadow: 0 8px 32px rgba(0,0,0,0.4); text-align: center; width: 100%; max-width: 500px; border: 1px solid #333; }
-        h1 { margin: 0 0 0.4rem; font-size: 1.8rem; color: #fff; }
-        p.subtitle { color: #888; margin: 0 0 2rem; font-size: 0.9rem; }
-        input { width: 100%; padding: 14px; margin-bottom: 1rem; border-radius: 8px; border: 1px solid #333; background-color: #2a2a2a; color: white; font-size: 1rem; }
+        body { font-family: 'Segoe UI', sans-serif; background: #121212; color: #eee;
+               display: flex; align-items: center; justify-content: center;
+               min-height: 100vh; margin: 0; padding: 1rem; }
+        .container { background: #1e1e1e; padding: 2.5rem; border-radius: 12px;
+                     box-shadow: 0 8px 32px rgba(0,0,0,.4); text-align: center;
+                     width: 100%; max-width: 500px; border: 1px solid #333; }
+        h1 { margin: 0 0 .4rem; font-size: 1.8rem; color: #fff; }
+        p.sub { color: #888; margin: 0 0 2rem; font-size: .9rem; }
+        input { width: 100%; padding: 14px; margin-bottom: 1rem; border-radius: 8px;
+                border: 1px solid #333; background: #2a2a2a; color: #fff; font-size: 1rem; }
         input:focus { outline: none; border-color: #4a90e2; }
-        button#dlBtn { background: linear-gradient(135deg, #4a90e2 0%, #357abd 100%); color: white; border: none; padding: 14px; border-radius: 8px; cursor: pointer; width: 100%; font-weight: 600; font-size: 1rem; transition: all 0.2s; }
-        button#dlBtn:hover { opacity: 0.9; transform: translateY(-1px); }
-        button#dlBtn:disabled { background: #444; cursor: not-allowed; transform: none; }
-        #dlLink { display: none; margin-top: 1rem; padding: 13px; background: linear-gradient(135deg, #27ae60 0%, #1e8449 100%); color: white; border-radius: 8px; text-decoration: none; font-weight: 600; font-size: 0.95rem; width: 100%; }
-        #dlLink:hover { opacity: 0.9; }
-        .status { margin-top: 1.2rem; font-size: 0.85rem; min-height: 20px; color: #888; }
-        #debugLog { margin-top: 1rem; font-size: 0.68rem; color: #555; text-align: left; display: none; max-height: 130px; overflow-y: auto; background: #111; padding: 8px; border-radius: 4px; font-family: monospace; }
+        #dlBtn { background: linear-gradient(135deg,#4a90e2,#357abd); color: #fff;
+                 border: none; padding: 14px; border-radius: 8px; cursor: pointer;
+                 width: 100%; font-weight: 600; font-size: 1rem; transition: .2s; }
+        #dlBtn:hover { opacity: .9; transform: translateY(-1px); }
+        #dlBtn:disabled { background: #444; cursor: not-allowed; transform: none; }
+        #dlLink { display: none; margin-top: 1rem; padding: 13px;
+                  background: linear-gradient(135deg,#27ae60,#1e8449); color: #fff;
+                  border-radius: 8px; text-decoration: none; font-weight: 600;
+                  font-size: .95rem; width: 100%; }
+        #dlLink:hover { opacity: .9; }
+        .status { margin-top: 1.2rem; font-size: .85rem; min-height: 20px; color: #888; }
+        #dbg { margin-top: 1rem; font-size: .68rem; color: #555; text-align: left;
+               display: none; max-height: 140px; overflow-y: auto; background: #111;
+               padding: 8px; border-radius: 4px; font-family: monospace; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>Video Downloader</h1>
-        <p class="subtitle">YouTube &middot; TikTok &middot; und mehr</p>
-
-        <input type="text" id="urlInput" placeholder="Link einfügen (YouTube, TikTok ...)" />
-        <button id="dlBtn" onclick="startDownload()">Download Starten</button>
+        <p class="sub">YouTube &middot; TikTok &middot; und mehr</p>
+        <input type="text" id="url" placeholder="Link einf&uuml;gen (YouTube, TikTok ...)"/>
+        <button id="dlBtn" onclick="go()">Download Starten</button>
         <a id="dlLink" target="_blank">&#x1F4E5; Download-Link &mdash; hier klicken</a>
-        <p class="status" id="statusText">Bereit.</p>
-        <div id="debugLog"></div>
+        <p class="status" id="st">Bereit.</p>
+        <div id="dbg"></div>
     </div>
+<script>
+let _ticker;
 
-    <script>
-    // Piped-Instanzen als Fallback (YouTube-only, CORS-aktiviert)
-    const PIPED_INSTANCES = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.adminforge.de",
-        "https://api.piped.yt",
-        "https://pipedapi.drgns.space",
-        "https://pipedapi.owo.si",
-        "https://piped-api.privacy.com.de",
-    ];
+function log(m) {
+    const d = document.getElementById('dbg');
+    d.style.display = 'block';
+    d.innerHTML += '<div>' + new Date().toTimeString().slice(0,8) + ' ' + m + '</div>';
+    d.scrollTop = d.scrollHeight;
+}
 
-    function log(msg) {
-        console.log(msg);
-        const d = document.getElementById('debugLog');
-        d.style.display = 'block';
-        d.innerHTML += '<div>' + new Date().toTimeString().slice(0,8) + ' ' + msg + '</div>';
-        d.scrollTop = d.scrollHeight;
-    }
+function st(msg, color) {
+    document.getElementById('st').style.color = color || '#888';
+    document.getElementById('st').textContent = msg;
+}
 
-    function setStatus(msg, color) {
-        const s = document.getElementById('statusText');
-        s.style.color = color || '#888';
-        s.textContent = msg;
-    }
+function startTicker(base) {
+    let i = 0;
+    _ticker = setInterval(() => { st(base + '.'.repeat((i++ % 3) + 1), '#aaa'); }, 600);
+}
 
-    function showDownloadLink(url, filename) {
-        const a = document.getElementById('dlLink');
-        a.href = url;
-        a.download = filename || '';
-        a.style.display = 'block';
-    }
+function stopTicker() { clearInterval(_ticker); }
 
-    function extractYoutubeId(url) {
-        const patterns = [
-            /[?&]v=([a-zA-Z0-9_-]{11})/,
-            /youtu\.be\/([a-zA-Z0-9_-]{11})/,
-            /\/shorts\/([a-zA-Z0-9_-]{11})/,
-            /\/embed\/([a-zA-Z0-9_-]{11})/,
-        ];
-        for (const p of patterns) {
-            const m = url.match(p);
-            if (m) return m[1];
-        }
-        return null;
-    }
+async function go() {
+    const url = document.getElementById('url').value.trim();
+    const btn = document.getElementById('dlBtn');
+    document.getElementById('dbg').innerHTML = '';
+    document.getElementById('dlLink').style.display = 'none';
+    if (!url) { st('Bitte Link eingeben!', '#f55'); return; }
 
-    // Strategie 1: Backend-Endpunkt nutzt yt-dlp serverseitig
-    async function tryBackend(url) {
-        log("Strategie 1: Backend (yt-dlp) ...");
+    btn.disabled = true;
+    btn.textContent = 'Suche…';
+    startTicker('Suche Download-Link');
+    log('URL: ' + url);
+
+    try {
         const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 25000);
-        try {
-            const resp = await fetch('/api/get-url', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url }),
-                signal: ctrl.signal,
-            });
-            clearTimeout(timer);
-            if (!resp.ok) {
-                const err = await resp.json().catch(() => ({}));
-                throw new Error(err.error || 'HTTP ' + resp.status);
-            }
-            const data = await resp.json();
-            if (!data.url) throw new Error('Keine URL in Backend-Antwort');
-            log('Backend OK: ' + (data.quality || '?') + ' ' + (data.ext || ''));
-            return data;
-        } catch (e) {
-            clearTimeout(timer);
-            throw e;
-        }
-    }
+        setTimeout(() => ctrl.abort(), 55000);
 
-    // Strategie 2: Piped API direkt aus dem Browser (nur YouTube)
-    async function tryPiped(url) {
-        const videoId = extractYoutubeId(url);
-        if (!videoId) {
-            log("Kein YouTube-Link – Piped übersprungen.");
-            return null;
-        }
-        log("Strategie 2: Piped API (Video-ID: " + videoId + ") ...");
-
-        for (const base of PIPED_INSTANCES) {
-            try {
-                log("Versuche " + base);
-                const ctrl = new AbortController();
-                const timer = setTimeout(() => ctrl.abort(), 10000);
-                const resp = await fetch(base + '/streams/' + videoId, { signal: ctrl.signal });
-                clearTimeout(timer);
-
-                if (!resp.ok) { log("HTTP " + resp.status + " bei " + base); continue; }
-
-                const data = await resp.json();
-                const streams = (data.videoStreams || []).filter(s => s.url);
-
-                // Kombinierte Streams bevorzugen (videoOnly === false)
-                const combined = streams.filter(s => s.videoOnly === false);
-                const pool = combined.length > 0 ? combined : streams;
-
-                if (pool.length === 0) { log("Keine Streams bei " + base); continue; }
-
-                pool.sort((a, b) => (parseInt(b.quality) || 0) - (parseInt(a.quality) || 0));
-                const best = pool[0];
-                log("Piped OK: " + best.quality + (combined.length === 0 ? " (nur Video, kein Ton)" : ""));
-
-                return {
-                    url: best.url,
-                    title: data.title || 'video',
-                    ext: 'mp4',
-                    quality: best.quality || '?',
-                    audioWarning: combined.length === 0,
-                };
-            } catch (e) {
-                log("Fehler bei " + base + ": " + e.message);
-            }
-        }
-        return null;
-    }
-
-    async function startDownload() {
-        const url = document.getElementById('urlInput').value.trim();
-        const btn = document.getElementById('dlBtn');
-        document.getElementById('debugLog').innerHTML = '';
-        document.getElementById('dlLink').style.display = 'none';
-
-        if (!url) { setStatus("Bitte Link eingeben!", '#ff5555'); return; }
-
-        btn.disabled = true;
-        btn.textContent = "Suche...";
-        setStatus("Verarbeite Link ...", '#aaa');
-
-        let result = null;
-
-        // --- Strategie 1: Backend ---
-        setStatus("Schritt 1/2: Backend (yt-dlp) ...", '#aaa');
-        try {
-            result = await tryBackend(url);
-        } catch (e) {
-            log("Backend fehlgeschlagen: " + e.message);
-        }
-
-        // --- Strategie 2: Piped ---
-        if (!result) {
-            setStatus("Schritt 2/2: Piped API ...", '#aaa');
-            try {
-                result = await tryPiped(url);
-            } catch (e) {
-                log("Piped fehlgeschlagen: " + e.message);
-            }
-        }
-
-        if (result && result.url) {
-            const filename = (result.title || 'video').replace(/[<>:"/\\\\|?*]/g, '_') + '.' + (result.ext || 'mp4');
-            const warn = result.audioWarning ? " (kein Ton – nur Video verfügbar)" : "";
-            setStatus("✓ Link gefunden!" + warn + " Download wurde gestartet.", '#55ff55');
-            showDownloadLink(result.url, filename);
-            // Automatisch öffnen
-            const a = document.createElement('a');
-            a.href = result.url;
-            a.target = '_blank';
-            a.rel = 'noopener';
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-        } else {
-            setStatus("Fehler: Kein Download-Link gefunden. Siehe Log.", '#ff5555');
-        }
-
-        btn.disabled = false;
-        btn.textContent = "Download Starten";
-    }
-
-    // Enter-Taste
-    document.addEventListener('DOMContentLoaded', () => {
-        document.getElementById('urlInput').addEventListener('keydown', e => {
-            if (e.key === 'Enter') startDownload();
+        const resp = await fetch('/api/get-url', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url }),
+            signal: ctrl.signal,
         });
+
+        stopTicker();
+        const data = await resp.json();
+
+        if (!resp.ok || !data.url) {
+            log('Fehler: ' + (data.error || 'Unbekannt'));
+            st('Fehler: ' + (data.error || 'Kein Download-Link gefunden.').slice(0, 120), '#f55');
+        } else {
+            const name = (data.title || 'video').replace(/[<>:"\/\\|?*]/g, '_')
+                       + '.' + (data.ext || 'mp4');
+            const src = data.source ? ' [' + data.source + ']' : '';
+            const warn = data.audioWarning ? ' ⚠️ kein Ton' : '';
+            log('OK: ' + data.quality + src + warn);
+            st('✓ Gefunden!' + warn + ' Download gestartet.', '#5f5');
+
+            const a = document.getElementById('dlLink');
+            a.href = data.url; a.download = name; a.style.display = 'block';
+
+            const tmp = document.createElement('a');
+            tmp.href = data.url; tmp.target = '_blank'; tmp.rel = 'noopener';
+            document.body.appendChild(tmp); tmp.click(); document.body.removeChild(tmp);
+        }
+    } catch (e) {
+        stopTicker();
+        log('Fehler: ' + e.message);
+        st('Fehler: ' + e.message.slice(0, 100), '#f55');
+    }
+
+    btn.disabled = false; btn.textContent = 'Download Starten';
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.getElementById('url').addEventListener('keydown', e => {
+        if (e.key === 'Enter') go();
     });
-    </script>
+});
+</script>
 </body>
 </html>
 """
+
+
+def extract_youtube_id(url):
+    for pat in [r'[?&]v=([a-zA-Z0-9_-]{11})', r'youtu\.be/([a-zA-Z0-9_-]{11})',
+                r'/shorts/([a-zA-Z0-9_-]{11})', r'/embed/([a-zA-Z0-9_-]{11})']:
+        m = re.search(pat, url)
+        if m:
+            return m.group(1)
+    return None
+
+
+def _best_url_from_info(info):
+    """Extract (url, ext, quality) from a yt-dlp info dict."""
+    if info.get('requested_formats'):
+        rf = info['requested_formats'][0]
+        return rf.get('url'), rf.get('ext', 'mp4'), str(rf.get('height', '?')) + 'p'
+    if info.get('url'):
+        return info['url'], info.get('ext', 'mp4'), str(info.get('height', '?')) + 'p'
+    for fmt in reversed(info.get('formats', [])):
+        if fmt.get('vcodec', 'none') != 'none' and fmt.get('acodec', 'none') != 'none' and fmt.get('url'):
+            return fmt['url'], fmt.get('ext', 'mp4'), str(fmt.get('height', '?')) + 'p'
+    for fmt in reversed(info.get('formats', [])):
+        if fmt.get('url'):
+            return fmt['url'], fmt.get('ext', 'mp4'), str(fmt.get('height', '?')) + 'p'
+    return None, 'mp4', '?'
+
+
+def try_ytdlp(url):
+    """
+    Use yt-dlp for non-YouTube URLs (TikTok, Twitter, etc.) and as a best-effort
+    attempt for YouTube with the android_vr client.
+    """
+    import yt_dlp
+
+    # Try android_vr first (current yt-dlp default, works for many non-YT platforms)
+    # then tv as a secondary attempt.
+    for client in ['android_vr', 'tv']:
+        try:
+            opts = {
+                'format': (
+                    'best[vcodec!=none][acodec!=none]'
+                    '/best[height<=720][vcodec!=none][acodec!=none]'
+                    '/best'
+                ),
+                'quiet': True,
+                'no_warnings': True,
+                'noplaylist': True,
+                'socket_timeout': 8,
+                'extractor_args': {'youtube': {'player_client': [client]}},
+            }
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if not info:
+                continue
+            dl_url, ext, quality = _best_url_from_info(info)
+            if dl_url:
+                return {
+                    'url': dl_url,
+                    'title': info.get('title', 'video'),
+                    'ext': ext,
+                    'quality': quality,
+                    'source': f'yt-dlp/{client}',
+                }
+        except Exception as e:
+            msg = str(e)
+            # Bot-detection is a hard stop for YouTube – skip remaining clients
+            if 'Sign in' in msg or 'bot' in msg.lower() or 'LOGIN_REQUIRED' in msg:
+                raise RuntimeError('YouTube bot-detection: ' + msg[:120])
+            # For other platforms keep trying
+            continue
+    return None
+
+
+def try_piped(video_id):
+    """Server-side Piped API call – bypasses browser CORS restrictions."""
+    for base in PIPED_INSTANCES:
+        try:
+            r = http.get(f'{base}/streams/{video_id}', timeout=7)
+            if not r.ok:
+                continue
+            data = r.json()
+            streams = [s for s in (data.get('videoStreams') or []) if s.get('url')]
+            if not streams:
+                continue
+
+            combined = [s for s in streams if s.get('videoOnly') is False]
+            pool = combined if combined else streams
+
+            def _q(s):
+                q = s.get('quality', '0')
+                return int(q.replace('p', '')) if q.replace('p', '').isdigit() else 0
+
+            pool.sort(key=_q, reverse=True)
+            best = pool[0]
+            return {
+                'url': best['url'],
+                'title': data.get('title', 'video'),
+                'ext': 'mp4',
+                'quality': best.get('quality', '?'),
+                'source': 'piped',
+                'audioWarning': not combined,
+            }
+        except Exception:
+            continue
+    return None
+
+
+def try_invidious(video_id):
+    """Server-side Invidious API – returns combined video+audio formatStreams."""
+    for base in INVIDIOUS_INSTANCES:
+        try:
+            r = http.get(
+                f'{base}/api/v1/videos/{video_id}',
+                params={'fields': 'formatStreams,title'},
+                timeout=7,
+            )
+            if not r.ok:
+                continue
+            data = r.json()
+            streams = data.get('formatStreams') or []
+            if not streams:
+                continue
+
+            def _res(s):
+                res = s.get('resolution', '0p')
+                return int(res.replace('p', '')) if res.replace('p', '').isdigit() else 0
+
+            streams.sort(key=_res, reverse=True)
+            best = streams[0]
+            return {
+                'url': best['url'],
+                'title': data.get('title', 'video'),
+                'ext': 'mp4',
+                'quality': best.get('qualityLabel', best.get('resolution', '?')),
+                'source': 'invidious',
+            }
+        except Exception:
+            continue
+    return None
 
 
 @app.route('/api/get-url', methods=['POST', 'OPTIONS'])
@@ -231,90 +304,36 @@ def get_download_url():
         resp.headers['Access-Control-Allow-Headers'] = 'Content-Type'
         return resp
 
-    data = request.get_json(silent=True) or {}
-    url = data.get('url', '').strip()
-
+    body = request.get_json(silent=True) or {}
+    url = body.get('url', '').strip()
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
 
-    try:
-        import yt_dlp
+    video_id = extract_youtube_id(url)
+    errors = []
 
-        ydl_opts = {
-            # Bevorzuge kombinierte Streams (Video+Audio in einer Datei)
-            'format': (
-                'best[height<=1080][vcodec!=none][acodec!=none]'
-                '/best[vcodec!=none][acodec!=none]'
-                '/best[height<=720]'
-                '/best'
-            ),
-            'quiet': True,
-            'no_warnings': True,
-            'noplaylist': True,
-            'socket_timeout': 12,
-            'extractor_args': {
-                'youtube': {'player_client': ['web', 'android']},
-            },
-        }
+    # Run all applicable strategies in parallel; return on first success
+    tasks = {'ytdlp': (try_ytdlp, (url,))}
+    if video_id:
+        tasks['piped'] = (try_piped, (video_id,))
+        tasks['invidious'] = (try_invidious, (video_id,))
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        fmap = {pool.submit(fn, *args): name for name, (fn, args) in tasks.items()}
+        try:
+            for fut in concurrent.futures.as_completed(fmap, timeout=28):
+                name = fmap[fut]
+                try:
+                    result = fut.result()
+                    if result:
+                        return jsonify(result)
+                    errors.append(f'{name}: no result')
+                except Exception as exc:
+                    errors.append(f'{name}: {str(exc)[:120]}')
+        except concurrent.futures.TimeoutError:
+            errors.append('timeout after 28s')
 
-        if not info:
-            return jsonify({'error': 'Keine Video-Informationen gefunden'}), 500
-
-        title = info.get('title', 'video')
-        download_url = None
-        ext = 'mp4'
-        quality = '?'
-
-        # Wenn yt-dlp mehrere Formate gewählt hat (Merge nötig) → nimm Video-Teil
-        if info.get('requested_formats'):
-            rf = info['requested_formats'][0]
-            download_url = rf.get('url')
-            ext = rf.get('ext', 'mp4')
-            quality = str(rf.get('height', '?')) + 'p'
-
-        # Einzelnes Format direkt verfügbar
-        elif info.get('url'):
-            download_url = info['url']
-            ext = info.get('ext', 'mp4')
-            quality = str(info.get('height', '?')) + 'p'
-
-        # Formate-Liste durchsuchen
-        elif info.get('formats'):
-            for fmt in reversed(info['formats']):
-                if (fmt.get('vcodec', 'none') != 'none'
-                        and fmt.get('acodec', 'none') != 'none'
-                        and fmt.get('url')):
-                    download_url = fmt['url']
-                    ext = fmt.get('ext', 'mp4')
-                    quality = str(fmt.get('height', '?')) + 'p'
-                    break
-            # Fallback: beliebige URL
-            if not download_url:
-                for fmt in reversed(info['formats']):
-                    if fmt.get('url'):
-                        download_url = fmt['url']
-                        ext = fmt.get('ext', 'mp4')
-                        quality = str(fmt.get('height', '?')) + 'p'
-                        break
-
-        if not download_url:
-            return jsonify({'error': 'Keine Download-URL gefunden'}), 500
-
-        return jsonify({
-            'url': download_url,
-            'title': title,
-            'ext': ext,
-            'quality': quality,
-        })
-
-    except Exception as exc:
-        msg = str(exc)
-        if len(msg) > 400:
-            msg = msg[:400] + '…'
-        return jsonify({'error': msg}), 500
+    return jsonify({'error': ' | '.join(errors) or 'All strategies failed'}), 500
 
 
 @app.route('/', defaults={'path': ''})
